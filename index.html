@@ -1,0 +1,881 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <title>SmartEye — Câmera</title>
+  <link rel="manifest" href="manifest.json" />
+
+  <!-- Socket.io cliente (carregado do servidor) -->
+  <script src="/socket.io/socket.io.js"></script>
+
+  <style>
+    /* ── Reset e base ────────────────────────── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:       #0a0e1a;
+      --surface:  #111827;
+      --border:   #1e2d40;
+      --green:    #00ff88;
+      --red:      #ff3355;
+      --amber:    #ffaa00;
+      --text:     #e2e8f0;
+      --muted:    #64748b;
+      --font:     'Courier New', monospace;
+    }
+
+    html, body {
+      height: 100%; width: 100%;
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--font);
+      overflow: hidden;
+      touch-action: none;
+    }
+
+    /* ── Layout ──────────────────────────────── */
+    #app {
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+      width: 100vw;
+    }
+
+    /* ── Header ──────────────────────────────── */
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 8px 16px;
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      flex-shrink: 0;
+    }
+
+    .logo {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 14px;
+      font-weight: bold;
+      letter-spacing: 2px;
+      color: var(--green);
+    }
+
+    .logo-icon {
+      width: 24px; height: 24px;
+      border: 2px solid var(--green);
+      border-radius: 50%;
+      position: relative;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .logo-icon::after {
+      content: '';
+      width: 8px; height: 8px;
+      background: var(--green);
+      border-radius: 50%;
+    }
+
+    /* ── Status badge ─────────────────────────── */
+    #status-badge {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 11px;
+      letter-spacing: 1px;
+      padding: 4px 10px;
+      border-radius: 4px;
+      border: 1px solid var(--border);
+      background: var(--bg);
+      transition: all 0.3s;
+    }
+
+    #status-badge.offline { border-color: var(--muted); color: var(--muted); }
+    #status-badge.connecting { border-color: var(--amber); color: var(--amber); }
+    #status-badge.online { border-color: var(--green); color: var(--green); }
+    #status-badge.streaming { border-color: var(--green); color: var(--green); background: rgba(0,255,136,0.1); }
+    #status-badge.motion { border-color: var(--red); color: var(--red); background: rgba(255,51,85,0.15); }
+
+    .dot {
+      width: 6px; height: 6px;
+      border-radius: 50%;
+      background: currentColor;
+    }
+
+    .dot.pulse { animation: pulse 1s infinite; }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50% { opacity: 0.4; transform: scale(0.7); }
+    }
+
+    /* ── Vídeo principal ──────────────────────── */
+    #video-container {
+      flex: 1;
+      position: relative;
+      overflow: hidden;
+      background: #000;
+    }
+
+    #video {
+      width: 100%; height: 100%;
+      object-fit: cover;
+      display: block;
+      transform: scaleX(-1); /* espelho */
+    }
+
+    /* Canvas oculto para captura de frames */
+    #capture-canvas { display: none; }
+
+    /* Canvas de overlay para visualizar detecção */
+    #motion-overlay {
+      position: absolute;
+      top: 0; left: 0;
+      width: 100%; height: 100%;
+      pointer-events: none;
+      opacity: 0;
+      transition: opacity 0.3s;
+    }
+
+    #motion-overlay.show { opacity: 0.6; }
+
+    /* ── Borda de alerta ──────────────────────── */
+    #alert-border {
+      position: absolute;
+      inset: 0;
+      border: 4px solid transparent;
+      pointer-events: none;
+      transition: border-color 0.15s;
+      z-index: 10;
+    }
+
+    #alert-border.active { border-color: var(--red); }
+
+    /* ── Scan lines (efeito visual) ────────────── */
+    #scan-lines {
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+      background: repeating-linear-gradient(
+        0deg,
+        transparent,
+        transparent 2px,
+        rgba(0,0,0,0.07) 2px,
+        rgba(0,0,0,0.07) 4px
+      );
+      z-index: 5;
+    }
+
+    /* ── HUD overlays ──────────────────────────── */
+    .hud {
+      position: absolute;
+      font-size: 10px;
+      letter-spacing: 1px;
+      color: rgba(0, 255, 136, 0.7);
+      z-index: 20;
+      pointer-events: none;
+    }
+
+    #hud-tl { top: 8px; left: 8px; }
+    #hud-tr { top: 8px; right: 8px; text-align: right; }
+    #hud-bl { bottom: 8px; left: 8px; }
+    #hud-br { bottom: 8px; right: 8px; text-align: right; }
+
+    #hud-rec {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
+
+    #hud-rec .rec-dot {
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      background: var(--red);
+      display: none;
+    }
+
+    #hud-rec.active .rec-dot { display: block; animation: pulse 1s infinite; }
+    #hud-rec.active .rec-text { color: var(--red); }
+
+    /* ── Tela de início ────────────────────────── */
+    #start-screen {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 20px;
+      background: var(--bg);
+      z-index: 100;
+    }
+
+    #start-screen .big-icon {
+      width: 80px; height: 80px;
+      border: 3px solid var(--green);
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      animation: breathe 2s ease-in-out infinite;
+    }
+
+    #start-screen .big-icon::after {
+      content: '';
+      width: 30px; height: 30px;
+      background: var(--green);
+      border-radius: 50%;
+    }
+
+    @keyframes breathe {
+      0%, 100% { box-shadow: 0 0 0 0 rgba(0,255,136,0.4); }
+      50% { box-shadow: 0 0 0 20px rgba(0,255,136,0); }
+    }
+
+    #start-screen h1 {
+      font-size: 22px;
+      letter-spacing: 4px;
+      color: var(--green);
+    }
+
+    #start-screen p {
+      font-size: 12px;
+      color: var(--muted);
+      letter-spacing: 1px;
+      text-align: center;
+      max-width: 280px;
+    }
+
+    /* ── Botões ────────────────────────────────── */
+    button {
+      font-family: var(--font);
+      cursor: pointer;
+      letter-spacing: 1px;
+      transition: all 0.2s;
+    }
+
+    #btn-start {
+      padding: 14px 36px;
+      font-size: 14px;
+      font-weight: bold;
+      background: var(--green);
+      color: #000;
+      border: none;
+      border-radius: 4px;
+      text-transform: uppercase;
+    }
+
+    #btn-start:hover { background: #00cc6a; transform: translateY(-1px); }
+    #btn-start:active { transform: translateY(0); }
+    #btn-start:disabled { background: var(--muted); color: var(--surface); cursor: not-allowed; }
+
+    /* ── Controles (barra inferior) ─────────────── */
+    #controls {
+      display: flex;
+      align-items: center;
+      justify-content: space-around;
+      padding: 10px 16px;
+      background: var(--surface);
+      border-top: 1px solid var(--border);
+      flex-shrink: 0;
+    }
+
+    .ctrl-btn {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 4px;
+      padding: 6px 12px;
+      background: transparent;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      color: var(--muted);
+      font-size: 10px;
+      min-width: 70px;
+    }
+
+    .ctrl-btn svg { width: 18px; height: 18px; }
+    .ctrl-btn.active { border-color: var(--green); color: var(--green); }
+    .ctrl-btn.danger { border-color: var(--red); color: var(--red); }
+
+    /* ── Stats bar ──────────────────────────────── */
+    #stats-bar {
+      display: flex;
+      gap: 16px;
+      padding: 6px 16px;
+      background: var(--bg);
+      border-top: 1px solid var(--border);
+      font-size: 10px;
+      color: var(--muted);
+      letter-spacing: 1px;
+      flex-shrink: 0;
+    }
+
+    .stat { display: flex; gap: 4px; }
+    .stat-val { color: var(--green); }
+
+    /* ── Toast de motion ────────────────────────── */
+    #motion-toast {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%) scale(0);
+      background: rgba(255, 51, 85, 0.9);
+      color: #fff;
+      padding: 12px 24px;
+      border-radius: 6px;
+      font-size: 14px;
+      font-weight: bold;
+      letter-spacing: 2px;
+      z-index: 50;
+      transition: transform 0.2s;
+      pointer-events: none;
+    }
+
+    #motion-toast.show { transform: translate(-50%, -50%) scale(1); }
+
+    /* ── Camera label ───────────────────────────── */
+    #cam-name-input {
+      background: transparent;
+      border: 1px solid var(--border);
+      color: var(--text);
+      font-family: var(--font);
+      font-size: 12px;
+      padding: 4px 8px;
+      border-radius: 4px;
+      width: 150px;
+      letter-spacing: 1px;
+    }
+
+    #cam-name-input:focus { outline: none; border-color: var(--green); }
+  </style>
+</head>
+<body>
+<div id="app">
+  <!-- Header -->
+  <header>
+    <div class="logo">
+      <div class="logo-icon"></div>
+      SMARTEYE
+    </div>
+
+    <input id="cam-name-input" type="text" value="Câmera 01" maxlength="20" placeholder="Nome da câmera" />
+
+    <div id="status-badge" class="offline">
+      <div class="dot pulse"></div>
+      <span id="status-text">OFFLINE</span>
+    </div>
+  </header>
+
+  <!-- Área de vídeo -->
+  <div id="video-container">
+    <!-- Tela inicial -->
+    <div id="start-screen">
+      <div class="big-icon"></div>
+      <h1>SMARTEYE</h1>
+      <p>Câmera de Segurança Inteligente<br>Toque para ativar a câmera</p>
+      <button id="btn-start">&#9654; INICIAR CÂMERA</button>
+      <p id="error-msg" style="color:var(--red); display:none;"></p>
+    </div>
+
+    <!-- Vídeo ao vivo -->
+    <video id="video" autoplay muted playsinline></video>
+
+    <!-- Canvas para captura (oculto) -->
+    <canvas id="capture-canvas"></canvas>
+
+    <!-- Overlay de detecção de movimento -->
+    <canvas id="motion-overlay"></canvas>
+
+    <!-- Borda de alerta -->
+    <div id="alert-border"></div>
+
+    <!-- Scan lines decorativas -->
+    <div id="scan-lines"></div>
+
+    <!-- HUD -->
+    <div class="hud" id="hud-tl">
+      <div id="hud-rec">
+        <div class="rec-dot"></div>
+        <span class="rec-text">LIVE</span>
+      </div>
+    </div>
+    <div class="hud" id="hud-tr">
+      <div id="hud-time">--:--:--</div>
+      <div id="hud-fps">-- FPS</div>
+    </div>
+    <div class="hud" id="hud-bl">
+      <div id="hud-motion-status">MOTION: OFF</div>
+    </div>
+    <div class="hud" id="hud-br">
+      <div id="hud-events">EVENTS: 0</div>
+    </div>
+
+    <!-- Toast de movimento -->
+    <div id="motion-toast">⚠ MOVIMENTO DETECTADO</div>
+  </div>
+
+  <!-- Stats bar -->
+  <div id="stats-bar">
+    <div class="stat">FPS: <span class="stat-val" id="stat-fps">0</span></div>
+    <div class="stat">FRAMES: <span class="stat-val" id="stat-frames">0</span></div>
+    <div class="stat">ALERTAS: <span class="stat-val" id="stat-alerts">0</span></div>
+    <div class="stat">LATÊNCIA: <span class="stat-val" id="stat-latency">--</span>ms</div>
+  </div>
+
+  <!-- Controles -->
+  <div id="controls">
+    <button class="ctrl-btn" id="btn-motion-toggle" onclick="toggleMotionDetection()">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
+        <circle cx="12" cy="12" r="3"/>
+      </svg>
+      DETECÇÃO
+    </button>
+
+    <button class="ctrl-btn" id="btn-flip" onclick="flipCamera()">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <path d="M17 2.1l4 4-4 4"/><path d="M3 12.2v-2a4 4 0 0 1 4-4h12.8M7 21.9l-4-4 4-4"/>
+        <path d="M21 11.8v2a4 4 0 0 1-4 4H4.2"/>
+      </svg>
+      CÂMERA
+    </button>
+
+    <button class="ctrl-btn" id="btn-snapshot" onclick="captureSnapshot()">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/>
+        <circle cx="12" cy="13" r="4"/>
+      </svg>
+      SNAPSHOT
+    </button>
+
+    <button class="ctrl-btn danger" id="btn-stop" onclick="stopCamera()" style="display:none;">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>
+      </svg>
+      PARAR
+    </button>
+  </div>
+</div>
+
+<script>
+/**
+ * SmartEye — Cliente Câmera
+ * Responsável por:
+ *  1. Acessar câmera via getUserMedia
+ *  2. Capturar frames e enviar via Socket.io
+ *  3. Detectar movimento comparando frames
+ *  4. Enviar alertas de movimento ao servidor
+ */
+
+// ─── Estado ─────────────────────────────────────────────────────────────────
+const state = {
+  socket: null,
+  stream: null,
+  isStreaming: false,
+  motionEnabled: true,
+  facingMode: "environment", // traseira por padrão
+  frameCount: 0,
+  alertCount: 0,
+  fps: 0,
+  fpsTimer: null,
+  frameInterval: null,
+  lastPingTime: 0,
+  latency: 0,
+  motionCooldown: false, // evita alertas repetidos
+  prevFrameData: null,   // frame anterior para comparação
+};
+
+// ─── Configurações ───────────────────────────────────────────────────────────
+const CONFIG = {
+  FRAME_INTERVAL_MS: 200,       // 5 FPS para streaming (~5 FPS)
+  FRAME_QUALITY: 0.5,           // qualidade JPEG (0-1)
+  FRAME_WIDTH: 640,             // largura do frame capturado
+  FRAME_HEIGHT: 480,
+  MOTION_THRESHOLD: 30,         // diferença de pixel para considerar movimento
+  MOTION_MIN_PIXELS: 500,       // mínimo de pixels alterados para alertar
+  MOTION_COOLDOWN_MS: 3000,     // segundos entre alertas de movimento
+  SNAPSHOT_QUALITY: 0.85,       // qualidade do snapshot de alerta
+};
+
+// ─── Elementos DOM ───────────────────────────────────────────────────────────
+const video       = document.getElementById("video");
+const captureCanvas = document.getElementById("capture-canvas");
+const motionOverlay = document.getElementById("motion-overlay");
+const startScreen = document.getElementById("start-screen");
+const btnStart    = document.getElementById("btn-start");
+const btnStop     = document.getElementById("btn-stop");
+const btnMotion   = document.getElementById("btn-motion-toggle");
+const statusBadge = document.getElementById("status-badge");
+const statusText  = document.getElementById("status-text");
+
+// ─── PWA: registrar service worker ───────────────────────────────────────────
+if ("serviceWorker" in navigator) {
+  navigator.serviceWorker.register("/camera/sw.js").catch(console.error);
+}
+
+// ─── Atualizar relógio HUD ───────────────────────────────────────────────────
+setInterval(() => {
+  const now = new Date();
+  document.getElementById("hud-time").textContent =
+    now.toTimeString().slice(0, 8);
+}, 1000);
+
+// ─── Conectar WebSocket ──────────────────────────────────────────────────────
+function connectSocket() {
+  setStatus("connecting", "CONECTANDO...");
+
+  // Conecta ao servidor na mesma origem
+  state.socket = io({ transports: ["websocket"] });
+
+  state.socket.on("connect", () => {
+    console.log("[WS] Conectado ao servidor:", state.socket.id);
+    // Registra esta câmera no servidor
+    const name = document.getElementById("cam-name-input").value || "Câmera";
+    state.socket.emit("camera:register", { name });
+  });
+
+  state.socket.on("camera:registered", (data) => {
+    console.log("[CAM] Registrada:", data);
+    setStatus("streaming", "TRANSMITINDO");
+    document.getElementById("hud-rec").classList.add("active");
+    startFrameCapture();
+  });
+
+  state.socket.on("pong", () => {
+    state.latency = Date.now() - state.lastPingTime;
+    document.getElementById("stat-latency").textContent = state.latency;
+  });
+
+  state.socket.on("disconnect", () => {
+    console.log("[WS] Desconectado");
+    setStatus("offline", "OFFLINE");
+    document.getElementById("hud-rec").classList.remove("active");
+    stopFrameCapture();
+  });
+
+  state.socket.on("connect_error", (err) => {
+    console.error("[WS] Erro:", err);
+    setStatus("offline", "ERRO CONEXÃO");
+  });
+
+  // Ping a cada 5s para medir latência
+  setInterval(() => {
+    if (state.socket?.connected) {
+      state.lastPingTime = Date.now();
+      state.socket.emit("ping");
+    }
+  }, 5000);
+}
+
+// ─── Iniciar câmera ──────────────────────────────────────────────────────────
+async function startCamera() {
+  btnStart.disabled = true;
+  btnStart.textContent = "INICIANDO...";
+
+  const constraints = {
+    video: {
+      facingMode: state.facingMode,
+      width: { ideal: 1280 },
+      height: { ideal: 720 },
+      frameRate: { ideal: 30 },
+    },
+    audio: false,
+  };
+
+  try {
+    // Solicita acesso à câmera
+    state.stream = await navigator.mediaDevices.getUserMedia(constraints);
+    video.srcObject = state.stream;
+
+    await video.play();
+
+    // Configura canvas de captura com resolução fixa
+    captureCanvas.width = CONFIG.FRAME_WIDTH;
+    captureCanvas.height = CONFIG.FRAME_HEIGHT;
+
+    // Configura canvas de overlay de movimento
+    motionOverlay.width = CONFIG.FRAME_WIDTH;
+    motionOverlay.height = CONFIG.FRAME_HEIGHT;
+
+    // Esconde tela de início
+    startScreen.style.display = "none";
+    btnStop.style.display = "flex";
+
+    state.isStreaming = true;
+
+    // Conecta ao WebSocket
+    connectSocket();
+
+    // Inicia contador de FPS
+    startFPSCounter();
+
+    console.log("[CAM] Câmera iniciada com sucesso");
+  } catch (err) {
+    console.error("[CAM] Erro ao acessar câmera:", err);
+    const msg = document.getElementById("error-msg");
+    msg.style.display = "block";
+    msg.textContent = err.name === "NotAllowedError"
+      ? "❌ Permissão de câmera negada. Verifique as configurações."
+      : `❌ Erro: ${err.message}`;
+    btnStart.disabled = false;
+    btnStart.textContent = "▶ TENTAR NOVAMENTE";
+  }
+}
+
+// ─── Parar câmera ────────────────────────────────────────────────────────────
+function stopCamera() {
+  if (state.stream) {
+    state.stream.getTracks().forEach((t) => t.stop());
+    state.stream = null;
+  }
+  state.isStreaming = false;
+  stopFrameCapture();
+
+  if (state.socket) {
+    state.socket.disconnect();
+    state.socket = null;
+  }
+
+  video.srcObject = null;
+  startScreen.style.display = "flex";
+  btnStart.disabled = false;
+  btnStart.textContent = "▶ INICIAR CÂMERA";
+  btnStop.style.display = "none";
+  setStatus("offline", "OFFLINE");
+}
+
+// ─── Trocar câmera (frente/traseira) ─────────────────────────────────────────
+async function flipCamera() {
+  state.facingMode = state.facingMode === "environment" ? "user" : "environment";
+  if (state.isStreaming) {
+    // Para stream atual
+    if (state.stream) state.stream.getTracks().forEach((t) => t.stop());
+    stopFrameCapture();
+
+    // Solicita nova câmera
+    try {
+      state.stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: state.facingMode },
+        audio: false,
+      });
+      video.srcObject = state.stream;
+      await video.play();
+      startFrameCapture();
+    } catch (err) {
+      console.error("[CAM] Erro ao trocar câmera:", err);
+    }
+  }
+}
+
+// ─── Captura de frames e envio ───────────────────────────────────────────────
+function startFrameCapture() {
+  if (state.frameInterval) return;
+  const ctx = captureCanvas.getContext("2d");
+
+  state.frameInterval = setInterval(() => {
+    if (!video.videoWidth) return;
+
+    // Desenha frame no canvas (com flip se câmera frontal)
+    ctx.save();
+    if (state.facingMode === "user") {
+      ctx.translate(CONFIG.FRAME_WIDTH, 0);
+      ctx.scale(-1, 1);
+    }
+    ctx.drawImage(video, 0, 0, CONFIG.FRAME_WIDTH, CONFIG.FRAME_HEIGHT);
+    ctx.restore();
+
+    // Obtém dados do frame
+    const imageData = ctx.getImageData(0, 0, CONFIG.FRAME_WIDTH, CONFIG.FRAME_HEIGHT);
+
+    // ── Detecção de movimento ──────────────────────────────────────────
+    if (state.motionEnabled && state.prevFrameData) {
+      const motionResult = detectMotion(imageData.data, state.prevFrameData);
+
+      if (motionResult.detected && !state.motionCooldown) {
+        triggerMotionAlert(motionResult.intensity);
+      }
+    }
+    state.prevFrameData = new Uint8ClampedArray(imageData.data);
+
+    // ── Enviar frame ao servidor ───────────────────────────────────────
+    if (state.socket?.connected) {
+      const frameBase64 = captureCanvas.toDataURL("image/jpeg", CONFIG.FRAME_QUALITY);
+      state.socket.emit("camera:frame", { frame: frameBase64 });
+    }
+
+    state.frameCount++;
+    document.getElementById("stat-frames").textContent = state.frameCount;
+  }, CONFIG.FRAME_INTERVAL_MS);
+}
+
+function stopFrameCapture() {
+  if (state.frameInterval) {
+    clearInterval(state.frameInterval);
+    state.frameInterval = null;
+  }
+  state.prevFrameData = null;
+}
+
+// ─── Detecção de movimento ───────────────────────────────────────────────────
+/**
+ * Compara dois frames pixel a pixel.
+ * Retorna { detected: bool, intensity: 0-100, changedPixels: n }
+ */
+function detectMotion(current, previous) {
+  const len = current.length;
+  let changedPixels = 0;
+  const overlayCtx = motionOverlay.getContext("2d");
+  const overlayData = overlayCtx.createImageData(CONFIG.FRAME_WIDTH, CONFIG.FRAME_HEIGHT);
+
+  for (let i = 0; i < len; i += 4) {
+    const dr = Math.abs(current[i]     - previous[i]);
+    const dg = Math.abs(current[i + 1] - previous[i + 1]);
+    const db = Math.abs(current[i + 2] - previous[i + 2]);
+
+    // Diferença média dos canais RGB
+    const diff = (dr + dg + db) / 3;
+
+    if (diff > CONFIG.MOTION_THRESHOLD) {
+      changedPixels++;
+      // Pinta pixel alterado em vermelho no overlay
+      overlayData.data[i]     = 255;  // R
+      overlayData.data[i + 1] = 0;    // G
+      overlayData.data[i + 2] = 0;    // B
+      overlayData.data[i + 3] = 180;  // A
+    }
+  }
+
+  // Atualiza overlay visual
+  overlayCtx.putImageData(overlayData, 0, 0);
+
+  const totalPixels = (CONFIG.FRAME_WIDTH * CONFIG.FRAME_HEIGHT);
+  const intensity = Math.min(100, Math.round((changedPixels / totalPixels) * 1000));
+  const detected = changedPixels > CONFIG.MOTION_MIN_PIXELS;
+
+  if (detected) {
+    motionOverlay.classList.add("show");
+  } else {
+    motionOverlay.classList.remove("show");
+  }
+
+  return { detected, intensity, changedPixels };
+}
+
+// ─── Disparar alerta de movimento ────────────────────────────────────────────
+function triggerMotionAlert(intensity) {
+  state.motionCooldown = true;
+  state.alertCount++;
+
+  // Atualiza UI
+  document.getElementById("alert-border").classList.add("active");
+  document.getElementById("motion-toast").classList.add("show");
+  document.getElementById("hud-motion-status").textContent = `MOTION: ${intensity}%`;
+  document.getElementById("stat-alerts").textContent = state.alertCount;
+  document.getElementById("hud-events").textContent = `EVENTS: ${state.alertCount}`;
+  setStatus("motion", "⚠ MOVIMENTO");
+
+  // Captura snapshot de alta qualidade
+  const snapshot = captureCanvas.toDataURL("image/jpeg", CONFIG.SNAPSHOT_QUALITY);
+
+  // Envia alerta ao servidor
+  if (state.socket?.connected) {
+    state.socket.emit("camera:motion", { intensity, snapshot });
+  }
+
+  // Remove efeitos visuais após 2s
+  setTimeout(() => {
+    document.getElementById("alert-border").classList.remove("active");
+    document.getElementById("motion-toast").classList.remove("show");
+    motionOverlay.classList.remove("show");
+    if (state.isStreaming) setStatus("streaming", "TRANSMITINDO");
+  }, 2000);
+
+  // Cooldown para evitar spam de alertas
+  setTimeout(() => {
+    state.motionCooldown = false;
+    document.getElementById("hud-motion-status").textContent = "MOTION: ON";
+  }, CONFIG.MOTION_COOLDOWN_MS);
+}
+
+// ─── Capturar snapshot manual ─────────────────────────────────────────────────
+function captureSnapshot() {
+  if (!state.isStreaming) return;
+  const snapshot = captureCanvas.toDataURL("image/jpeg", CONFIG.SNAPSHOT_QUALITY);
+  if (state.socket?.connected) {
+    state.socket.emit("camera:motion", { intensity: 0, snapshot, manual: true });
+  }
+  // Flash visual
+  const border = document.getElementById("alert-border");
+  border.style.borderColor = "#00ff88";
+  setTimeout(() => { border.style.borderColor = ""; }, 300);
+}
+
+// ─── Toggle detecção de movimento ─────────────────────────────────────────────
+function toggleMotionDetection() {
+  state.motionEnabled = !state.motionEnabled;
+  btnMotion.classList.toggle("active", state.motionEnabled);
+  document.getElementById("hud-motion-status").textContent =
+    state.motionEnabled ? "MOTION: ON" : "MOTION: OFF";
+  console.log("[MOTION]", state.motionEnabled ? "Ativada" : "Desativada");
+}
+
+// ─── Contador de FPS ─────────────────────────────────────────────────────────
+function startFPSCounter() {
+  let frameCountTemp = 0;
+  const fpsInterval = setInterval(() => {
+    if (!state.isStreaming) { clearInterval(fpsInterval); return; }
+    state.fps = frameCountTemp;
+    document.getElementById("hud-fps").textContent = `${state.fps} FPS`;
+    document.getElementById("stat-fps").textContent = state.fps;
+    frameCountTemp = 0;
+  }, 1000);
+
+  // Conta frames de vídeo reais do browser
+  let lastTime = 0;
+  function countFrame(time) {
+    if (state.isStreaming) requestAnimationFrame(countFrame);
+    if (time - lastTime >= 1000 / 30) { frameCountTemp++; lastTime = time; }
+  }
+  requestAnimationFrame(countFrame);
+}
+
+// ─── Atualizar status badge ───────────────────────────────────────────────────
+function setStatus(type, text) {
+  statusBadge.className = `${type}`;
+  statusText.textContent = text;
+  // Re-adiciona classe ao badge
+  statusBadge.id = "status-badge";
+  statusBadge.className = type;
+}
+
+// ─── Inicialização ────────────────────────────────────────────────────────────
+btnStart.addEventListener("click", startCamera);
+
+// Ativa botão de detecção por padrão
+btnMotion.classList.add("active");
+
+// Evita que a tela apague (Wake Lock API)
+async function requestWakeLock() {
+  if ("wakeLock" in navigator) {
+    try {
+      await navigator.wakeLock.request("screen");
+      console.log("[PWA] Wake Lock ativado — tela não vai apagar");
+    } catch (e) {
+      console.warn("[PWA] Wake Lock não disponível:", e.message);
+    }
+  }
+}
+requestWakeLock();
+
+console.log("[SmartEye] Cliente câmera carregado. Toque em INICIAR CÂMERA.");
+</script>
+</body>
+</html>
