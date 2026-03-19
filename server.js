@@ -84,8 +84,8 @@ function dashboardAuth(req, res, next) {
 }
 
 // ─── Rotas estáticas ──────────────────────────────────────────────────────────
-app.use("/dashboard", dashboardAuth, express.static(path.join(__dirname, "../dashboard")));
-app.use("/camera",    express.static(path.join(__dirname, "../client-camera")));
+app.use("/dashboard", dashboardAuth, express.static(path.join(process.cwd(), "dashboard")));
+app.use("/camera",    express.static(path.join(process.cwd(), "client-camera")));
 
 app.get("/", (req, res) => res.redirect("/dashboard"));
 
